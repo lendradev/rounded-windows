@@ -351,7 +351,11 @@ export default class RoundedWindowCornersExtension extends Extension {
 
     #getEffect(actor) {
         const target = this.#targetActor(actor);
-        return target ? target.get_effect(ROUNDED_CORNERS_EFFECT) : null;
+        try {
+            return target ? target.lastChild.get_effect(ROUNDED_CORNERS_EFFECT) : null;
+        } catch (e) {
+            return null
+        };
     }
 
     #isFractionalScalingEnabled() {
@@ -542,7 +546,7 @@ export default class RoundedWindowCornersExtension extends Extension {
             return;
         }
 
-        target.add_effect_with_name(ROUNDED_CORNERS_EFFECT, new RoundedCornersEffect());
+        target.get_last_child()?.add_effect_with_name(ROUNDED_CORNERS_EFFECT, new RoundedCornersEffect());
 
         let shadow = null;
         let bindings = [];
@@ -566,6 +570,23 @@ export default class RoundedWindowCornersExtension extends Extension {
         this.#refreshRoundedCorners(actor);
     }
 
+    #disconnectSignal(actor) {
+        try {
+            logDbg(`Removing signals from "${actor.metaWindow?.title}"`);
+        } catch (_) { }
+
+        const data = _actorMap.get(actor);
+        if (!data) return;
+
+        // Disconnect per-window signals safely
+        if (data.connections) {
+            for (const c of data.connections) {
+                try { c.obj.disconnect(c.id); } catch (_) { }
+            }
+            data.connections = [];
+        }
+    }
+
     #onRemoveEffect(actor) {
         try {
             this.#logDbg(`Removing effect from "${actor.metaWindow?.title}"`);
@@ -574,18 +595,11 @@ export default class RoundedWindowCornersExtension extends Extension {
         try {
             const target = this.#targetActor(actor);
             if (target)
-                target.remove_effect_by_name(ROUNDED_CORNERS_EFFECT);
+                target.get_last_child()?.remove_effect_by_name(ROUNDED_CORNERS_EFFECT);
         } catch (_) { }
 
         const data = this.#actorMap.get(actor);
         if (!data) return;
-
-        if (data.connections) {
-            for (const c of data.connections) {
-                try { c.obj.disconnect(c.id); } catch (_) { }
-            }
-            data.connections = [];
-        }
 
         for (const b of data.bindings)
             b.unbind();
@@ -704,6 +718,10 @@ export default class RoundedWindowCornersExtension extends Extension {
 
         addWinConn(win, 'notify::fullscreen',
             () => { if (actor.metaWindow) this.#refreshRoundedCorners(actor); });
+
+        // Maximized state changed (may not cause a size change)
+        addWinConn(win, 'notify::maximized-horizontally', () => { if (actor.metaWindow) this.#refreshRoundedCorners(actor); });
+        addWinConn(win, 'notify::maximized-vertically', () => { if (actor.metaWindow) this.#refreshRoundedCorners(actor); });
         addWinConn(win, 'notify::appears-focused',
             () => { if (actor.metaWindow) this.#refreshFocus(actor); });
         addWinConn(win, 'workspace-changed',
@@ -759,6 +777,20 @@ export default class RoundedWindowCornersExtension extends Extension {
             return;
         }
 
+        // make sure that the actor is not a bms-application-blurred-widget.
+        const bmsActorName = 'bms-application-blurred-widget';
+        const actorReady = (actor.firstChild && actor.firstChild.name !== bmsActorName) ||
+            (actor.lastChild && actor.lastChild.name !== bmsActorName);
+        if (!actorReady) {
+            const id = actor.connect('child-added', (actor, child) => {
+                if (child.name !== bmsActorName) {
+                    applyEffectTo(actor);
+                    actor.disconnect(id);
+                }
+            });
+        }
+
+
         // Add effect first, then signals — prevents re-entrant
         // refreshRoundedCorners before #actorMap is populated.
         this.#onAddEffect(actor);
@@ -794,7 +826,10 @@ export default class RoundedWindowCornersExtension extends Extension {
             (_, win) => this.#applyEffectToWindow(win));
 
         this.#addConnection(global.windowManager, 'destroy',
-            (_, actor) => this.#onRemoveEffect(actor));
+            (_, actor) => {
+                this.#disconnectSignal(actor);
+                this.#onRemoveEffect(actor);
+            });
 
         // Minimise: hide shadow + disable effect to prevent shadow showing
         // through the minimise animation.
